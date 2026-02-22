@@ -7,13 +7,14 @@ import logging
 import sys
 
 import numpy as np
-from faster_whisper import WhisperModel
+import mlx_whisper
+import torch
+from silero_vad import load_silero_vad
 from anki.collection import Collection
 from openai import OpenAI
 from html2text import html2text
 import webview
 import pyaudio
-import torch
 
 from config import OPENAI_KEY, ANKI_PATH
 
@@ -27,25 +28,17 @@ TEST = len(sys.argv) > 1 and sys.argv[1] == "noaudio"
 # Audio settings
 SAMPLE_RATE = 16000
 CHUNK = int(SAMPLE_RATE / 10)
-num_samples = 1536  # Number of samples to use for the VAD model
+num_samples = 512  # silero-vad v5+ requires exactly 512 samples at 16kHz
 audio = pyaudio.PyAudio()
 
+MLX_MODEL = "mlx-community/whisper-tiny.en-mlx"
 
 client = OpenAI(api_key=OPENAI_KEY)
 
 
 if not TEST:
-    # Takes about 0.5 seconds, small.en is about 1.5s on my machine
-    model = WhisperModel(
-        "tiny.en",
-        device="cpu",
-        compute_type="float32",
-    )
-
-    # For dialog detection
-    vad_model, utils = torch.hub.load(
-        repo_or_dir="snakers4/silero-vad", model="silero_vad"
-    )
+    # For dialog detection (silero-vad pip package, ONNX-backed)
+    vad_model = load_silero_vad()
 
 
 def confidence(chunk):
@@ -63,17 +56,16 @@ def confidence(chunk):
 
 def transcribe(audio_data):
     """
-    Use Whisper to transcribe audio.
+    Use mlx-whisper to transcribe audio.
     """
     audio_data = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
-    segments, _ = model.transcribe(
+    result = mlx_whisper.transcribe(
         audio_data / np.max(audio_data),
+        path_or_hf_repo=MLX_MODEL,
         language="en",
-        beam_size=5,
-        without_timestamps=True,
         initial_prompt="Z_i = A X squared plus B X plus C",
     )
-    return "".join(x.text for x in segments)
+    return result["text"]
 
 
 def transcribe_answer():
@@ -165,9 +157,10 @@ def tts(text):
 
         # Use OpenAI TTS to cache audio for next time
         def cache():
-            client.audio.speech.create(
-                model="tts-1", voice="nova", input=text
-            ).stream_to_file(f"cached_audio/{key}.mp3")
+            with client.audio.speech.with_streaming_response.create(
+                model="tts-1-hd", voice="nova", input=text
+            ) as response:
+                response.stream_to_file(f"cached_audio/{key}.mp3")
 
         threading.Thread(target=cache, daemon=True).start()
 
@@ -177,7 +170,7 @@ def make_latex_speakable(text):
         return text
     return (
         client.chat.completions.create(
-            model="gpt-3.5-turbo-1106",
+            model="gpt-4o-mini",
             messages=[
                 {
                     "role": "user",
@@ -228,7 +221,7 @@ def main_backend(window):
             else:
                 score = int(
                     client.chat.completions.create(
-                        model="gpt-3.5-turbo-1106",
+                        model="gpt-4o-mini",
                         messages=[
                             {
                                 "role": "system",

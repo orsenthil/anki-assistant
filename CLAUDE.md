@@ -36,8 +36,8 @@ Single-file application (`anki_ai.py`) that creates a voice-driven Anki flashcar
 
 1. **PyWebView window** (`display_card.html`) renders the current card's HTML/LaTeX via KaTeX
 2. **Main loop** (`main_backend`) iterates through due cards from the Anki collection, skipping cloze cards and cards with images/rendered LaTeX
-3. **TTS pipeline**: first uses macOS `say` command immediately, then caches OpenAI TTS audio (`cached_audio/`) for future use; LaTeX is translated to speakable text via GPT-3.5 before speaking
-4. **STT pipeline**: Silero VAD detects speech in a background thread, Faster-Whisper (`tiny.en`) transcribes; listening ends after 2 seconds of silence
-5. **Scoring**: GPT-3.5 rates the user's spoken answer 1–4; score feeds directly into Anki's scheduler (`collection.sched.answerCard`)
+3. **TTS pipeline**: first uses macOS `say` command immediately, then caches OpenAI TTS audio (`cached_audio/`) for future use; LaTeX is translated to speakable text via GPT-4o-mini before speaking
+4. **STT pipeline**: Silero VAD (pip package, ONNX-backed) detects speech in a background thread, mlx-whisper (`mlx-community/whisper-tiny.en-mlx`) transcribes on Apple Silicon GPU; listening ends after 2 seconds of silence
+5. **Scoring**: GPT-4o-mini rates the user's spoken answer 1–4; score feeds directly into Anki's scheduler (`collection.sched.answerCard`)
 
 The `window.evaluate_js()` bridge is used to update card HTML and flash the screen green/red after scoring.
