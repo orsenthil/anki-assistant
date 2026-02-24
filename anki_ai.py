@@ -41,6 +41,16 @@ if not TEST:
     vad_model = load_silero_vad()
 
 
+def find_usb_input_device():
+    """Return the device index of the first non-built-in audio input device, or None."""
+    for i in range(audio.get_device_count()):
+        d = audio.get_device_info_by_index(i)
+        if d["maxInputChannels"] > 0 and "built-in" not in d["name"].lower():
+            log.info(f"Using external mic: [{i}] {d['name']}")
+            return i
+    return None
+
+
 def confidence(chunk):
     """
     Use Silero VAD to detect if the user is speaking.
@@ -81,12 +91,14 @@ def transcribe_answer():
         return input("Your text: ")
 
     # Record audio until no talking for 0.8 seconds
+    usb_device = find_usb_input_device()
     stream = audio.open(
         format=pyaudio.paInt16,
         channels=1,
         rate=SAMPLE_RATE,
         input=True,
         frames_per_buffer=CHUNK,
+        input_device_index=usb_device,
     )
 
     log.debug("Listening")
