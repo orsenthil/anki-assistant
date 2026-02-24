@@ -24,6 +24,7 @@ logging.basicConfig()
 
 
 TEST = len(sys.argv) > 1 and sys.argv[1] == "noaudio"
+KEEP_CAM = "camera" in sys.argv
 
 # Audio settings
 SAMPLE_RATE = 16000
@@ -32,8 +33,11 @@ num_samples = 512  # silero-vad v5+ requires exactly 512 samples at 16kHz
 audio = pyaudio.PyAudio()
 
 MLX_MODEL = "mlx-community/whisper-tiny.en-mlx"
+MAX_QUESTIONS = 20
 
 client = OpenAI(api_key=OPENAI_KEY)
+
+quit_event = threading.Event()
 
 
 if not TEST:
@@ -49,6 +53,27 @@ def find_usb_input_device():
             log.info(f"Using external mic: [{i}] {d['name']}")
             return i
     return None
+
+
+def keep_camera_alive():
+    """Open the webcam video stream in a background thread to prevent the device from sleeping."""
+    import cv2
+    cap = None
+    for idx in range(4):
+        candidate = cv2.VideoCapture(idx)
+        if candidate.isOpened():
+            log.info(f"Camera keep-alive: opened device {idx}")
+            cap = candidate
+            break
+        candidate.release()
+    if cap is None:
+        log.warning("Camera keep-alive: no camera found")
+        return
+    while not quit_event.is_set():
+        cap.read()
+        time.sleep(0.033)  # ~30 fps keep-alive
+    cap.release()
+    log.info("Camera keep-alive: released")
 
 
 def confidence(chunk):
@@ -130,6 +155,11 @@ def transcribe_answer():
 
     while not len(data):
         # Wait for user to start talking
+        if quit_event.is_set():
+            stop.set()
+            stream.stop_stream()
+            stream.close()
+            return ""
         time.sleep(0.1)
 
     while True:
@@ -201,10 +231,18 @@ def main_backend(window):
     def display_html(html):
         window.evaluate_js(f"window.updateHtml(String.raw`{html}`);")
 
+    if KEEP_CAM:
+        threading.Thread(target=keep_camera_alive, daemon=True).start()
+
     collection = Collection(ANKI_PATH)
+    questions_answered = 0
 
     try:
-        while current_card := collection.sched.getCard():
+        while not quit_event.is_set() and questions_answered < MAX_QUESTIONS:
+            current_card = collection.sched.getCard()
+            if current_card is None:
+                break
+
             # TODO: handle cloze cards
             if "basic" not in current_card.note_type()["name"].lower():
                 log.debug("Skipping cloze")
@@ -224,6 +262,13 @@ def main_backend(window):
             current_card.timer_started = time.time()  # Start timer for scoring
             user_response = transcribe_answer()
 
+            if quit_event.is_set():
+                break
+
+            if any(w in user_response.lower() for w in ("quit", "exit", "stop session")):
+                log.info("User requested quit")
+                break
+
             if "skip card" in user_response.lower():
                 collection.sched.bury_cards([current_card.id])
                 continue
@@ -237,16 +282,21 @@ def main_backend(window):
                         messages=[
                             {
                                 "role": "system",
-                                "content": "You are a PhD in applied mathematics, giving flashcards to a student. Rate how correct the student was, on a scale of 1-4:\n"
-                                + "1 - Doesn't know the answer. Totally incorrect, blank, or gibberish.\n"
-                                + "2 - Shows some knowledge.\n"
-                                + "3 - Partially incorrect.\n"
-                                + "4 - Demonstrates understanding. Responses that lack specific details can still get a 4. Responses that explain the concept in a different way can still get a 4.\n"
-                                + "Answer only numerically!",
+                                "content": (
+                                    "You are a tutor evaluating a student's conceptual understanding of a flashcard. "
+                                    "Do NOT require an exact match — judge whether the student grasps the underlying idea. "
+                                    "Different phrasing, analogies, or explanations that convey the same concept are perfectly acceptable. "
+                                    "Rate 1-4:\n"
+                                    "1 - No understanding. Blank, gibberish, or completely wrong.\n"
+                                    "2 - Vague or partial understanding — on the right track but missing the core idea.\n"
+                                    "3 - Shows understanding but with a notable gap or minor conceptual error.\n"
+                                    "4 - Demonstrates solid conceptual understanding. Exact wording is not required.\n"
+                                    "Answer only numerically!"
+                                ),
                             },
                             {
                                 "role": "user",
-                                "content": f'Q: {question}\nA:{answer}\Student Response: "{user_response}"',
+                                "content": f'Question: {question}\nReference Answer: {answer}\nStudent Response: "{user_response}"',
                             },
                         ],
                         temperature=0,
@@ -262,6 +312,7 @@ def main_backend(window):
             )
             log.info(f"Score: {score}")
             collection.sched.answerCard(current_card, score)
+            questions_answered += 1
 
             if score < 4:
                 # Show correct answer if user got it wrong
@@ -271,7 +322,9 @@ def main_backend(window):
                 tts(answer)
                 time.sleep(3)
     finally:
+        quit_event.set()
         collection.close()
+        window.destroy()
 
 
 if __name__ == "__main__":
@@ -279,4 +332,5 @@ if __name__ == "__main__":
         "Anki Voice Assistant",
         html=open("display_card.html", "r").read(),
     )
+    window.events.closed += lambda: quit_event.set()
     webview.start(main_backend, window)

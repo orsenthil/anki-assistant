@@ -1,6 +1,7 @@
 anki==25.9.2
 html2text==2020.1.16
 mlx-whisper
+opencv-python
 openai>=2.0
 PyAudio==0.2.14
 pywebview==6.1
